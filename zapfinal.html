@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Zap! - Vector Fan Arcade</title>
+  <style>
+    body {
+      background: #050505;
+      color: #00ff66;
+      font-family: monospace;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      margin: 0;
+    }
+    .top-bar {
+      width: 600px;
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      margin-bottom: 10px;
+    }
+    h1 {
+      margin: 0;
+      font-size: 32px;
+      font-family: 'Georgia', serif;
+      font-style: italic;
+      letter-spacing: 2px;
+      color: #ff0055;
+      text-shadow: 0 0 10px rgba(255, 0, 85, 0.4);
+    }
+    #ui {
+      font-size: 14px;
+      white-space: nowrap;
+    }
+    canvas {
+      border: 2px solid #00ff66;
+      box-shadow: 0 0 20px rgba(0, 255, 102, 0.3);
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="top-bar">
+    <h1>Zap!</h1>
+    <div id="ui">LEVEL: <span id="lvl">1</span> | SCORE: <span id="score">0</span> | LIVES: <span id="lives">⚡⚡⚡</span></div>
+  </div>
+  <canvas id="gameCanvas" width="600" height="600"></canvas>
+
+<script>
+  const canvas = document.getElementById('gameCanvas');
+  const ctx = canvas.getContext('2d');
+  const centerX = canvas.width / 2;
+  const centerY = canvas.height / 2 - 50;
+
+  // --- GAME STATE ---
+  let level = 1;
+  let score = 0;
+  let lives = 3;
+  let fanAngle = 0;
+  let fanSpeed = 0.018;
+
+  const braillePool = ['⠁', '⠃', '⠉', '⠙', '⠑', '⠋', '⠛', '⠓', '⠊', '⠚', '⠧', '⠼', '⠾', '⠿'];
+  let sectorGlyphs = ['⠁', '⠃', '⠉']; 
+  let sectorData = [];
+
+  let targetSequence = [];
+  let playerInput = [];
+  let zapMessageTimer = 0;
+  let isZapped = false;
+  let hoveredSector = null;
+
+  let audioCtx = null;
+  function initAudio() {
+    if (!audioCtx) {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    if (audioCtx.state === 'suspended') {
+      audioCtx.resume();
+    }
+  }
+
+  // --- SOUND EFFECTS ---
+  function playClickSound() {
+    initAudio();
+    if (!audioCtx) return;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(1200, audioCtx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(300, audioCtx.currentTime + 0.08);
+    gain.gain.setValueAtTime(0.6, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.08);
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.start();
+    osc.stop(audioCtx.currentTime + 0.08);
+  }
+
+  function playCompleteSound() {
+    initAudio();
+    if (!audioCtx) return;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(440, audioCtx.currentTime);
+    osc.frequency.setValueAtTime(880, audioCtx.currentTime + 0.08);
+    gain.gain.setValueAtTime(0.5, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.2);
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.start();
+    osc.stop(audioCtx.currentTime + 0.2);
+  }
+
+  function playZapSound() {
+    initAudio();
+    if (!audioCtx) return;
+    
+    const bufferSize = audioCtx.sampleRate * 0.25;
+    const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+    const output = buffer.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++) {
+      output[i] = (Math.random() * 2 - 1) * 2.0;
+    }
+
+    const whiteNoise = audioCtx.createBufferSource();
+    whiteNoise.buffer = buffer;
+
+    const filter = audioCtx.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.frequency.value = 1000;
+    filter.Q.value = 2.0;
+
+    const gain = audioCtx.createGain();
+    gain.gain.setValueAtTime(1.5, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.25);
+
+    whiteNoise.connect(filter);
+    filter.connect(gain);
+    gain.connect(audioCtx.destination);
+    whiteNoise.start();
+  }
+
+  function updateLivesDisplay() {
+    let lightningString = '';
+    for (let i = 0; i < lives; i++) {
+      lightningString += '⚡';
+    }
+    document.getElementById('lives').innerText = lightningString;
+  }
+
+  function startLevel() {
+    sectorGlyphs = [
+      braillePool[Math.floor(Math.random() * braillePool.length)],
+      braillePool[Math.floor(Math.random() * braillePool.length)],
+      braillePool[Math.floor(Math.random() * braillePool.length)]
+    ];
+
+    const sequenceLength = 2 + level;
+    targetSequence = [];
+    for (let i = 0; i < sequenceLength; i++) {
+      targetSequence.push(sectorGlyphs[Math.floor(Math.random() * 3)]);
+    }
+
+    playerInput = [];
+    fanSpeed = 0.018 + (level - 1) * 0.007; 
+
+    document.getElementById('lvl').innerText = level;
+    updateLivesDisplay();
+  }
+
+  function resetGame() {
+    level = 1;
+    score = 0;
+    lives = 3;
+    fanSpeed = 0.018;
+    document.getElementById('score').innerText = score;
+    document.getElementById('lvl').innerText = level;
+    startLevel();
+  }
+
+  function draw() {
+    ctx.fillStyle = '#050505';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    ctx.save();
+    ctx.translate(centerX, centerY);
+
+    sectorData = [];
+
+    for (let i = 0; i < 3; i++) {
+      ctx.save();
+      const angle = (i * 120 + 60) * Math.PI / 180;
+      const x = Math.sin(angle) * 140;
+      const y = -Math.cos(angle) * 140;
+
+      sectorData.push({ x: x + centerX, y: y + centerY, angle: angle, index: i });
+
+      if (hoveredSector === i) {
+        ctx.fillStyle = '#ffffff';
+        ctx.shadowColor = '#00ff66';
+        ctx.shadowBlur = 15;
+      } else {
+        ctx.fillStyle = '#00ff66';
+        ctx.shadowBlur = 0;
+      }
+
+      ctx.font = '32px monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(sectorGlyphs[i], x, y);
+
+      ctx.restore();
+    }
+
+    fanAngle += fanSpeed;
+    for (let b = 0; b < 3; b++) {
+      ctx.save();
+      const currentBladeAngle = fanAngle + (b * 120 * Math.PI / 180);
+      ctx.rotate(currentBladeAngle);
+
+      ctx.strokeStyle = '#ff0055';
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.lineTo(0, -200);
+      ctx.stroke();
+
+      ctx.restore();
+    }
+
+    ctx.restore();
+
+    if (isZapped) {
+      zapMessageTimer++;
+      if (zapMessageTimer > 40) {
+        isZapped = false;
+      }
+    }
+
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '16px monospace';
+    ctx.textAlign = 'center';
+
+    if (isZapped) {
+      ctx.fillStyle = '#ff0055';
+      ctx.fillText("ZAP! LIVES LEFT: " + lives, canvas.width / 2, 535);
+    } else {
+      ctx.fillText("CODE: " + targetSequence.join(" "), canvas.width / 2, 515);
+      ctx.fillText("INPUT: " + playerInput.join(" "), canvas.width / 2, 555);
+    }
+
+    requestAnimationFrame(draw);
+  }
+
+  function handleTap(glyphIndex) {
+    playClickSound();
+    const tappedGlyph = sectorGlyphs[glyphIndex];
+    playerInput.push(tappedGlyph);
+
+    const currentStep = playerInput.length - 1;
+    if (playerInput[currentStep] !== targetSequence[currentStep]) {
+      playerInput = [];
+      return;
+    }
+
+    if (playerInput.length === targetSequence.length) {
+      playCompleteSound();
+      score += level * 100;
+      level++;
+      document.getElementById('score').innerText = score;
+      startLevel();
+    }
+  }
+
+  canvas.addEventListener('mousemove', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const mouseX = e.clientX - rect.left;
+    const mouseY = e.clientY - rect.top;
+
+    hoveredSector = null;
+    for (let sector of sectorData) {
+      const dist = Math.hypot(mouseX - sector.x, mouseY - sector.y);
+      if (dist < 30) {
+        hoveredSector = sector.index;
+        break;
+      }
+    }
+  });
+
+  canvas.addEventListener('click', (e) => {
+    initAudio();
+    const rect = canvas.getBoundingClientRect();
+    const clickX = e.clientX - rect.left;
+    const clickY = e.clientY - rect.top;
+
+    for (let sector of sectorData) {
+      const dist = Math.hypot(clickX - sector.x, clickY - sector.y);
+      if (dist < 30) {
+        let hitBlade = false;
+        const normalizedButtonAngle = (sector.angle % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2);
+
+        for (let b = 0; b < 3; b++) {
+          const rawBladeAngle = fanAngle + (b * 120 * Math.PI / 180);
+          const normalizedBladeAngle = (rawBladeAngle % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2);
+
+          if (Math.abs(normalizedBladeAngle - normalizedButtonAngle) < 0.15) {
+            hitBlade = true;
+            break;
+          }
+        }
+
+        if (hitBlade) {
+          playZapSound();
+          isZapped = true;
+          zapMessageTimer = 0;
+          playerInput = [];
+          lives--;
+          updateLivesDisplay();
+
+          if (lives <= 0) {
+            resetGame();
+          }
+        } else {
+          handleTap(sector.index);
+        }
+        break;
+      }
+    }
+  });
+
+  startLevel();
+  draw();
+</script>
+</body>
+</html>
